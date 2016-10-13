@@ -8,4 +8,10 @@ public interface DetectCallBack {
     void DetectCollision(String string);
 
     void DetectMove(int x, int y, int z);
+
+    void DetectBrake();
+
+    void DetectAccelerate();
+
+    void DetectTurn();
 }
