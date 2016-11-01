@@ -5,11 +5,17 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.os.Environment;
+import android.renderscript.ScriptIntrinsicYuvToRGB;
 import android.util.Log;
 
-import java.util.Calendar;
+import java.io.File;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 import static android.content.Context.SENSOR_SERVICE;
+import static com.qihoo.ai.drivermannersdk.FFT.fft;
+import static com.qihoo.ai.drivermannersdk.FFT.ifft;
 
 /**
  * Created by panjunwei-iri on 2016/10/12.
@@ -17,16 +23,27 @@ import static android.content.Context.SENSOR_SERVICE;
 
 public class DetectDecide implements SensorEventListener{
     private static final String TAG = DetectDecide.class.getSimpleName();
+    final static SimpleDateFormat DF = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS");
+    private String[] title = { "Time","X_Ori", "Y_Ori", "Z_Ori", "|V|_Ori", "X_FFT" , "Y_FFT", "Z_FFT", "|V|_FFT"};
+    private File xlsFile;
+    private String xlsFileName;
     private DetectCallBack mDetectCallBack;
     private SensorManager mSensorManager;
     private Sensor mSensor;
 
-    private int mX, mY, mZ;
-    private long lasttimestamp = 0;
-    Calendar mCalendar;
     private Context mContext;
 
-    private float[] oriValues = new float[3];
+    private static final int sampleCnt = 2048;
+    private static final int dealCnt = 200;
+
+    private float[][] oriValues = new float[4][sampleCnt];
+    private float[][] tmpValues = new float[4][sampleCnt];
+    private float[][] fftValues = new float[4][sampleCnt];
+    private float[][] fftTmp = new float[4][dealCnt];
+    private float[][] bufValues = new float[4][dealCnt];
+    private long[] timeNow = new long[sampleCnt];
+    private long[] timeTmp = new long[dealCnt];
+    private long[] timeBuf = new long[dealCnt];
     private final int valueNum = 4;
     //用于存放计算阈值的波峰波谷差值
     private float[] tempValue = new float[valueNum];
@@ -57,6 +74,10 @@ public class DetectDecide implements SensorEventListener{
     private final float initialValue = (float) 1.3;
     //初始阈值
     private float ThresholdValue = (float) 2.0;
+    private static int winCnt = 0;
+    private static int stepCnt = 0;
+    private static int dataIndex = 0;
+
 
     DetectDecide(Context context){
         mContext = context;
@@ -69,12 +90,9 @@ public class DetectDecide implements SensorEventListener{
                 mSensorManager = (SensorManager)mContext.getSystemService(SENSOR_SERVICE);
                 mSensor = mSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
                 mSensorManager.registerListener(detectDecide, mSensor, SensorManager.SENSOR_DELAY_NORMAL);
+                initExcel();//初始化Excel表格
             }
         }).start();
-//        mDetectCallBack = detectCallBack;
-//        mSensorManager = (SensorManager)mContext.getSystemService(SENSOR_SERVICE);
-//        mSensor = mSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-//        mSensorManager.registerListener(detectDecide, mSensor, SensorManager.SENSOR_DELAY_NORMAL);
     }
 
     public void unregisterGsensor(DetectDecide detectDecide){
@@ -83,13 +101,73 @@ public class DetectDecide implements SensorEventListener{
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        if(event.sensor.getType() == Sensor.TYPE_ACCELEROMETER){
-            for (int i = 0; i < 3; i++) {
-                oriValues[i] = event.values[i];
+        timeOfNow = System.currentTimeMillis();
+        if(event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
+            if(winCnt == sampleCnt){
+                for(int i = 0;i<3;i++){
+                    tmpValues[i][stepCnt] = event.values[i];
+                }
+                tmpValues[3][stepCnt] = (float) Math.sqrt(tmpValues[0][stepCnt] * tmpValues[0][stepCnt]
+                        + tmpValues[1][stepCnt] * tmpValues[1][stepCnt]
+                        + tmpValues[2][stepCnt] * tmpValues[2][stepCnt]);
+                timeTmp[stepCnt] = timeOfNow;
+                stepCnt++;
+            }else {
+                for (int i = 0; i < 3; i++) {
+                    oriValues[i][winCnt] = event.values[i];
+                }
+                oriValues[3][winCnt] = (float) Math.sqrt(oriValues[0][winCnt] * oriValues[0][winCnt]
+                        + oriValues[1][winCnt] * oriValues[1][winCnt]
+                        + oriValues[2][winCnt] * oriValues[2][winCnt]);
+                timeNow[winCnt] = timeOfNow;
+                winCnt++;
+                if(winCnt == sampleCnt){
+                    if(xlsFileName != null){
+                        ExcelUtils.writeOneArrayToExcel(timeNow, xlsFileName,dataIndex,0);
+                        ExcelUtils.writeArrayToExcel(oriValues, xlsFileName, dataIndex, 1);
+                        for(int i = 0; i <4; i++) {
+                            fftFilter(oriValues[i], oriValues[i].length, fftValues[i]);
+                        }
+                        ExcelUtils.writeArrayToExcel(fftValues, xlsFileName, dataIndex, 5);
+//                        Log.e(TAG, "writeOArrayToExcel");
+                        dataIndex = winCnt-dealCnt;
+                    }
+                }
+                Log.e(TAG, "winCnt = "+ winCnt );
+                //程序运行采集到4000点作为窗口，进行第一次FFT滤波，此后每采集100个数据替换原来4000点中最老的100个点
+                //然后进行FFT滤波，这样可以得到可用的G-Sensor数据Value[0-3]分别代表X，Y，Z和V
             }
-            gravityNew = (float) Math.sqrt(oriValues[0] * oriValues[0]
-                    + oriValues[1] * oriValues[1] + oriValues[2] * oriValues[2]);
-            DetectorNewStep(gravityNew);
+            if(stepCnt == dealCnt){
+                dataIndex += dealCnt;
+//                ExcelUtils.writeOArrayToExcel(tmpValues, xlsFileName, dataIndex, 0);
+
+                int n = sampleCnt - stepCnt;
+                System.arraycopy(timeNow, stepCnt, timeNow, 0, n);
+                System.arraycopy(timeTmp, 0, timeNow, n, stepCnt);
+                System.arraycopy(timeTmp, 0, timeBuf, 0, stepCnt);
+                for(int i = 0; i<4;i++){
+                    System.arraycopy(oriValues[i], stepCnt, oriValues[i], 0, n);
+                    System.arraycopy(tmpValues[i], 0, oriValues[i], n, stepCnt);
+                    System.arraycopy(tmpValues[i], 0, bufValues[i], 0, stepCnt);
+                }
+                new Thread(new Runnable() {
+                    public void run() {
+//                        此处进行FFT滤波，得到可用的G-Sensor数值
+                        for(int i = 0; i < 4; i++) {
+                            fftFilter(oriValues[i], oriValues[i].length, fftValues[i]);
+                            System.arraycopy(fftValues[i], sampleCnt-dealCnt, fftTmp[i], 0,dealCnt);
+                        }
+                        ExcelUtils.writeOneArrayToExcel(timeBuf, xlsFileName,dataIndex,0);
+                        ExcelUtils.writeArrayToExcel(bufValues, xlsFileName, dataIndex, 1);
+                        ExcelUtils.writeArrayToExcel(fftTmp, xlsFileName, dataIndex, 5);
+                    }
+                }).start();
+//                DetectorNewStep(gravityNew);
+                stepCnt = 0;
+            }
+
+
+
         }
 
     }
@@ -105,7 +183,7 @@ public class DetectDecide implements SensorEventListener{
      * 2.如果检测到了波峰，并且符合时间差以及阈值的条件，则判定为1步
      * 3.符合时间差条件，波峰波谷差值大于initialValue，则将该差值纳入阈值的计算中
      * */
-    public void DetectorNewStep(float values) {
+    private void DetectorNewStep(float values) {
         if (gravityOld == 0) {
             gravityOld = values;
         } else {
@@ -146,7 +224,7 @@ public class DetectDecide implements SensorEventListener{
      * 1.观察波形图，可以发现在出现步子的地方，波谷的下一个就是波峰，有比较明显的特征以及差值
      * 2.所以要记录每次的波谷值，为了和下次的波峰做对比
      * */
-    public boolean DetectorPeak(float newValue, float oldValue) {
+    private boolean DetectorPeak(float newValue, float oldValue) {
         lastStatus = isDirectionUp;
         if (newValue >= oldValue) {
             isDirectionUp = true;
@@ -175,7 +253,7 @@ public class DetectDecide implements SensorEventListener{
      * 2.记录4个值，存入tempValue[]数组中
      * 3.在将数组传入函数averageValue中计算阈值
      * */
-    public float Peak_Valley_Thread(float value) {
+    private float Peak_Valley_Thread(float value) {
         float tempThread = ThresholdValue;
         if (tempCount < valueNum) {
             tempValue[tempCount] = value;
@@ -197,7 +275,7 @@ public class DetectDecide implements SensorEventListener{
      * 2.通过均值将阈值梯度化在一个范围里
      * 3.参数暂时不开放（a,b,c,d,e,f,g,h,i,i,k,l）
      * */
-    public float averageValue(float value[], int n) {
+    private float averageValue(float value[], int n) {
         float ave = 0;
         for (int i = 0; i < n; i++) {
             ave += value[i];
@@ -215,5 +293,39 @@ public class DetectDecide implements SensorEventListener{
             ave = 1.3F;
         }
         return ave;
+    }
+
+    private void initExcel() {
+//        xlsFile = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + File.separator+"360DriveApi/");
+        makeDir();
+        Log.e(TAG, xlsFile.toString());
+        xlsFileName = xlsFile + File.separator + "360_CAR" +DF.format(new Date())+".xls";
+        Log.e(TAG, xlsFileName);
+        ExcelUtils.initExcel(xlsFileName, title);
+    }
+
+
+    private boolean makeDir() {
+        xlsFile = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + File.separator+"360DriveApi/");
+        if (!xlsFile.exists()) {
+            return xlsFile.mkdirs();
+        }
+        return true;
+    }
+
+    private void fftFilter(float[] oriSignal, int num, float result[]){
+        Complex[] x = new Complex[num];
+        Complex zero = new Complex(0,0);
+        for(int i = 0; i < num; i++){
+            x[i] = new Complex(oriSignal[i], 0);
+        }
+        Complex[] xFFT = fft(x);
+        for(int i = 100; i< sampleCnt; i++){ //100是参数，之后抽取出来，表示滤波精度
+            xFFT[i] = zero;
+        }
+        Complex[] xIFFT = ifft(xFFT);
+        for(int i = 0; i< num; i++) {
+            result[i] = (float) xIFFT[i].re();//把fftValues提出去，作为返回值
+        }
     }
 }
