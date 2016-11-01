@@ -6,7 +6,6 @@ import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Environment;
-import android.renderscript.ScriptIntrinsicYuvToRGB;
 import android.util.Log;
 
 import java.io.File;
@@ -35,49 +34,60 @@ public class DetectDecide implements SensorEventListener{
 
     private static final int sampleCnt = 2048;
     private static final int dealCnt = 200;
+    private static final int valueNum = 4;
 
-    private float[][] oriValues = new float[4][sampleCnt];
-    private float[][] tmpValues = new float[4][sampleCnt];
-    private float[][] fftValues = new float[4][sampleCnt];
-    private float[][] fftTmp = new float[4][dealCnt];
-    private float[][] bufValues = new float[4][dealCnt];
-    private long[] timeNow = new long[sampleCnt];
-    private long[] timeTmp = new long[dealCnt];
-    private long[] timeBuf = new long[dealCnt];
-    private final int valueNum = 4;
-    //用于存放计算阈值的波峰波谷差值
-    private float[] tempValue = new float[valueNum];
-    private int tempCount = 0;
-    //是否上升的标志位
-    private boolean isDirectionUp = false;
-    //持续上升次数
-    private int continueUpCount = 0;
-    //上一点的持续上升的次数，为了记录波峰的上升次数
-    private int continueUpFormerCount = 0;
-    //上一点的状态，上升还是下降
-    private boolean lastStatus = false;
-    //波峰值
-    private float peakOfWave = 0;
-    //波谷值
-    private float valleyOfWave = 0;
-    //此次波峰的时间
-    private long timeOfThisPeak = 0;
-    //上次波峰的时间
-    private long timeOfLastPeak = 0;
-    //当前的时间
-    private long timeOfNow = 0;
-    //当前传感器的值
-    private float gravityNew = 0;
-    //上次传感器的值
-    private float gravityOld = 0;
-    //动态阈值需要动态的数据，这个值用于这些动态数据的阈值
-    private final float initialValue = (float) 1.3;
-    //初始阈值
-    private float ThresholdValue = (float) 2.0;
+    private static final int X = 0;
+    private static final int Y = 1;
+    private static final int Z = 2;
+
     private static int winCnt = 0;
     private static int stepCnt = 0;
     private static int dataIndex = 0;
 
+    private float[][] oriValues = new float[valueNum][sampleCnt];
+    private float[][] tmpValues = new float[valueNum][sampleCnt];
+    private float[][] fftValues = new float[valueNum][sampleCnt];
+    private float[][] fftTmp = new float[valueNum][dealCnt];
+    private float[][] bufValues = new float[valueNum][dealCnt];
+    private long[] timeNow = new long[sampleCnt];
+    private long[] timeTmp = new long[dealCnt];
+    private long[] timeBuf = new long[dealCnt];
+    private float[] baseOfWave = new float[valueNum];
+
+    //加速、减速及转弯检测的阈值，该阈值根据实际情况调整
+    private float accThresValue = (float) 1.0;
+    private float decThresValue = (float) 2.0;
+    private float turThresValue = (float) 1.5;
+
+
+    //是否上升的标志位
+    private boolean isDirectionUp[] = {false, false, false};
+    //持续上升次数
+    private int continueUpCount[] = new int[3];
+    //持续下降次数
+    private int continueDownCount[] = new int[3];
+    //上一点的持续上升的次数，为了记录波峰的上升次数
+    private int continueUpFormerCount[] = new int[3];
+    //上一点的持续下降的次数，为了记录波峰的下降次数
+    private int continueDownFormerCount[] = new int[3];
+    //上一点的状态，上升还是下降
+    private boolean lastStatus[] = {false, false, false};
+    //波峰值
+    private float peakOfWave[] = new float[3];
+    //波谷值
+    private float valleyOfWave[] = new float[3];
+    //此次波峰的时间
+    private long timeOfThisPeak[] = new long[3];
+    //上次波峰的时间
+    private long timeOfLastPeak[] = new long[3];
+    //此次波谷的时间
+    private long timeOfThisValley[] = new long[3];
+    //上次波峰谷的时间
+    private long timeOfLastValley[] = new long[3];
+    //当前的时间
+    private long timeOfNow = 0;
+    //上次传感器的值
+    private float gravityOld[] = new float[3];
 
     DetectDecide(Context context){
         mContext = context;
@@ -111,6 +121,9 @@ public class DetectDecide implements SensorEventListener{
                         + tmpValues[1][stepCnt] * tmpValues[1][stepCnt]
                         + tmpValues[2][stepCnt] * tmpValues[2][stepCnt]);
                 timeTmp[stepCnt] = timeOfNow;
+                DetectorNewStep(fftTmp[2][stepCnt], timeBuf[stepCnt], Z);//Z轴，注意判断的是上dealCnt的值，
+                // 也就是说说会延后这么长时间，目的是讲任务分散开，避免任务过于集中影响效率。
+                // timeBuf也是上一周期相应的时间点
                 stepCnt++;
             }else {
                 for (int i = 0; i < 3; i++) {
@@ -126,7 +139,7 @@ public class DetectDecide implements SensorEventListener{
                         ExcelUtils.writeOneArrayToExcel(timeNow, xlsFileName,dataIndex,0);
                         ExcelUtils.writeArrayToExcel(oriValues, xlsFileName, dataIndex, 1);
                         for(int i = 0; i <4; i++) {
-                            fftFilter(oriValues[i], oriValues[i].length, fftValues[i]);
+                            baseOfWave[i] = fftFilter(oriValues[i], oriValues[i].length, fftValues[i]);
                         }
                         ExcelUtils.writeArrayToExcel(fftValues, xlsFileName, dataIndex, 5);
 //                        Log.e(TAG, "writeOArrayToExcel");
@@ -154,7 +167,7 @@ public class DetectDecide implements SensorEventListener{
                     public void run() {
 //                        此处进行FFT滤波，得到可用的G-Sensor数值
                         for(int i = 0; i < 4; i++) {
-                            fftFilter(oriValues[i], oriValues[i].length, fftValues[i]);
+                            baseOfWave[i] = fftFilter(oriValues[i], oriValues[i].length, fftValues[i]);
                             System.arraycopy(fftValues[i], sampleCnt-dealCnt, fftTmp[i], 0,dealCnt);
                         }
                         ExcelUtils.writeOneArrayToExcel(timeBuf, xlsFileName,dataIndex,0);
@@ -165,11 +178,7 @@ public class DetectDecide implements SensorEventListener{
 //                DetectorNewStep(gravityNew);
                 stepCnt = 0;
             }
-
-
-
         }
-
     }
 
     @Override
@@ -178,121 +187,89 @@ public class DetectDecide implements SensorEventListener{
     }
 
     /*
-     * 检测步子，并开始计步
-     * 1.传入sersor中的数据
-     * 2.如果检测到了波峰，并且符合时间差以及阈值的条件，则判定为1步
-     * 3.符合时间差条件，波峰波谷差值大于initialValue，则将该差值纳入阈值的计算中
+     * 检测加减速
+     * 1.传入sersor中相应轴的数据，以及该数据的时间
+     * 2.如果检测到了波峰，并且符合时间差以及阈值的条件，则判定为1次加速，反之为减速
      * */
-    private void DetectorNewStep(float values) {
-        if (gravityOld == 0) {
-            gravityOld = values;
+    private void DetectorNewStep(float values, long currTime, int axis) {
+        if(axis>2 || axis <0){
+            return;
+        }
+        if (gravityOld[axis] == 0) {
+            gravityOld[axis] = values;
         } else {
-            if (DetectorPeak(values, gravityOld)) {
-                timeOfLastPeak = timeOfThisPeak;
-                timeOfNow = System.currentTimeMillis();
-                if (timeOfNow - timeOfLastPeak >= 250
-                        && (peakOfWave - valleyOfWave >= ThresholdValue)) {
-                    timeOfThisPeak = timeOfNow;
-                    /*
-                     * 更新界面的处理，不涉及到算法
-                     * 一般在通知更新界面之前，增加下面处理，为了处理无效运动：
-                     * 1.连续记录10才开始计步
-                     * 2.例如记录的9步用户停住超过3秒，则前面的记录失效，下次从头开始
-                     * 3.连续记录了9步用户还在运动，之前的数据才有效
-                     * */
-//                    mStepListeners.onStep();
-                    mDetectCallBack.DetectAccelerate();
-                }
-                if (timeOfNow - timeOfLastPeak >= 250
-                        && (peakOfWave - valleyOfWave >= initialValue)) {
-                    timeOfThisPeak = timeOfNow;
-                    ThresholdValue = Peak_Valley_Thread(peakOfWave - valleyOfWave);
-                }
+            switch (axis) {
+                case Z:
+                    if (DetectorPeak(values, gravityOld[axis], axis)) {
+                        timeOfLastPeak[axis] = timeOfThisPeak[axis];
+                        timeOfLastValley[axis] = timeOfThisValley[axis];
+                        //加速判断
+                        if (currTime - timeOfLastPeak[axis] >= 1000
+                                && (peakOfWave[axis] - baseOfWave[2] >= accThresValue)) {
+                            timeOfThisPeak[axis] = currTime;
+                            mDetectCallBack.DetectAccelerate(values, timeOfThisPeak[axis]);
+                        }
+                        //减速判断
+                        if (currTime - timeOfLastValley[axis] >= 1000
+                                && (baseOfWave[2] - valleyOfWave[axis] >= decThresValue)) {
+                            timeOfThisValley[axis] = currTime;
+                            mDetectCallBack.DetectBrake(values, timeOfThisValley[axis]);
+                        }
+                    }
+                    break;
+                case X:
+                    if (DetectorPeak(values, gravityOld[axis], axis)) {
+                        timeOfLastPeak[axis] = timeOfThisPeak[axis];
+                        if(currTime - timeOfLastPeak[axis] > 1000
+                                &&(peakOfWave[axis] - valleyOfWave[axis] >= turThresValue)){
+                            timeOfLastPeak[axis] = currTime;
+                            mDetectCallBack.DetectTurn(values,timeOfThisValley[axis]);
+                        }
+                    }
+                    break;
             }
         }
-        gravityOld = values;
+        gravityOld[axis] = values;
     }
 
     /*
      * 检测波峰
-     * 以下四个条件判断为波峰：
+     * 以下3个条件判断为波峰：
      * 1.目前点为下降的趋势：isDirectionUp为false
      * 2.之前的点为上升的趋势：lastStatus为true
-     * 3.到波峰为止，持续上升大于等于2次
-     * 4.波峰值大于20
+     * 3.到波峰为止，持续上升大于等于10次
      * 记录波谷值
      * 1.观察波形图，可以发现在出现步子的地方，波谷的下一个就是波峰，有比较明显的特征以及差值
      * 2.所以要记录每次的波谷值，为了和下次的波峰做对比
      * */
-    private boolean DetectorPeak(float newValue, float oldValue) {
+    private boolean DetectorPeak(float newValue, float oldValue, int axis) {
+        if(axis>2 || axis <0){
+            return false;
+        }
         lastStatus = isDirectionUp;
         if (newValue >= oldValue) {
-            isDirectionUp = true;
-            continueUpCount++;
+            continueDownFormerCount = continueDownCount;
+            isDirectionUp[axis] = true;
+            continueUpCount[axis]++;
+            continueDownCount[axis] = 0;
         } else {
             continueUpFormerCount = continueUpCount;
-            continueUpCount = 0;
-            isDirectionUp = false;
+            continueDownCount[axis]++;
+            continueUpCount[axis] = 0;
+            isDirectionUp[axis] = false;
         }
 
-        if (!isDirectionUp && lastStatus
-                && (continueUpFormerCount >= 2 || oldValue >= 20)) {
-            peakOfWave = oldValue;
+        if (!isDirectionUp[axis] && lastStatus[axis]
+                && continueUpFormerCount[axis] >= 10 ) {
+            peakOfWave[axis] = oldValue;
             return true;
-        } else if (!lastStatus && isDirectionUp) {
-            valleyOfWave = oldValue;
-            return false;
+        } else if (!lastStatus[axis] && isDirectionUp[axis]
+                && continueDownFormerCount[axis] >= 10) {
+            valleyOfWave[axis] = oldValue;
+            return true;
         } else {
             return false;
         }
-    }
-
-    /*
-     * 阈值的计算
-     * 1.通过波峰波谷的差值计算阈值
-     * 2.记录4个值，存入tempValue[]数组中
-     * 3.在将数组传入函数averageValue中计算阈值
-     * */
-    private float Peak_Valley_Thread(float value) {
-        float tempThread = ThresholdValue;
-        if (tempCount < valueNum) {
-            tempValue[tempCount] = value;
-            tempCount++;
-        } else {
-            tempThread = averageValue(tempValue, valueNum);
-            for (int i = 1; i < valueNum; i++) {
-                tempValue[i - 1] = tempValue[i];
-            }
-            tempValue[valueNum - 1] = value;
-        }
-        return tempThread;
-
-    }
-
-    /*
-     * 梯度化阈值
-     * 1.计算数组的均值
-     * 2.通过均值将阈值梯度化在一个范围里
-     * 3.参数暂时不开放（a,b,c,d,e,f,g,h,i,i,k,l）
-     * */
-    private float averageValue(float value[], int n) {
-        float ave = 0;
-        for (int i = 0; i < n; i++) {
-            ave += value[i];
-        }
-        ave = ave / valueNum;
-        if (ave >= 8.0)
-            ave = 4.3F;
-        else if (ave >= 7.0 && ave < 8.0)
-            ave = 3.3F;
-        else if (ave >= 4.0 && ave < 7.0)
-            ave = 2.3F;
-        else if (ave >= 3.0 && ave < 4.0)
-            ave = 2.0F;
-        else {
-            ave = 1.3F;
-        }
-        return ave;
     }
 
     private void initExcel() {
@@ -313,7 +290,7 @@ public class DetectDecide implements SensorEventListener{
         return true;
     }
 
-    private void fftFilter(float[] oriSignal, int num, float result[]){
+    private float fftFilter(float[] oriSignal, int num, float result[]){
         Complex[] x = new Complex[num];
         Complex zero = new Complex(0,0);
         for(int i = 0; i < num; i++){
@@ -323,9 +300,11 @@ public class DetectDecide implements SensorEventListener{
         for(int i = 100; i< sampleCnt; i++){ //100是参数，之后抽取出来，表示滤波精度
             xFFT[i] = zero;
         }
+        float baseOfWave = (float)xFFT[0].re();
         Complex[] xIFFT = ifft(xFFT);
         for(int i = 0; i< num; i++) {
             result[i] = (float) xIFFT[i].re();//把fftValues提出去，作为返回值
         }
+        return baseOfWave;
     }
 }

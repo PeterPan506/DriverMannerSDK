@@ -5,13 +5,10 @@ package com.qihoo.ai.drivermannersdk;
  */
 
 public interface DetectCallBack {
-    void DetectCollision(String string);
 
-    void DetectMove(int x, int y, int z);
+    void DetectBrake(float values, long time);
 
-    void DetectBrake();
+    void DetectAccelerate(float values, long time);
 
-    void DetectAccelerate();
-
-    void DetectTurn();
+    void DetectTurn(float values, long time);
 }

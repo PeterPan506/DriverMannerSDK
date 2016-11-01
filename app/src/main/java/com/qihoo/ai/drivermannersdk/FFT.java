@@ -2,7 +2,6 @@ package com.qihoo.ai.drivermannersdk;
 
 /******************************************************************************
  *  Compilation:  javac FFT.java
- *  Execution:    java FFT n
  *  Dependencies: Complex.java
  *
  *  Compute the FFT and inverse FFT of a length n complex sequence.

@@ -36,31 +36,18 @@ public class MainActivity extends AppCompatActivity implements DetectCallBack{
         mDetectDecide.unregisterGsensor(mDetectDecide);
     }
 
-
     @Override
-    public void DetectCollision(String string) {
-        Log.e(TAG, "Receiving: "+string);
+    public void DetectBrake(float values, long time) {
+        Log.e(TAG, "Detected sudden brake");
     }
 
     @Override
-    public void DetectMove(int x, int y, int z) {
-        Log.e(TAG, "Is move detected"+ x +" " + y +" " + z);
+    public void DetectAccelerate(float values, long time) {
+        Log.e(TAG, "Detected sudden accelerate");
     }
 
     @Override
-    public void DetectBrake() {
-        Log.e(TAG, "Detected sharp brake");
-    }
-
-    @Override
-    public void DetectAccelerate() {
-        stepcount++;
-        stepCount.setText(stepcount+"");
-        Log.e(TAG, "Detected fast accelerate"+stepcount);
-    }
-
-    @Override
-    public void DetectTurn() {
+    public void DetectTurn(float values, long time) {
         Log.e(TAG, "Detected sudden steering");
     }
 }
